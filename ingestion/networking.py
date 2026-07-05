@@ -1,12 +1,3 @@
-"""
-Pipeline 1: OS-level Wi-Fi RSSI polling with automatic simulated fallback.
-
-Architecture:
-  - RSSIProvider (base): reads real RSSI from the OS
-  - SimulatedRSSIProvider: produces realistic fake data when OS access fails
-  - RSSIWorker (QThread): polls a provider on a timer, emits results via Qt signal
-"""
-
 import math
 import os
 import platform
@@ -22,28 +13,25 @@ POLL_INTERVAL_SECONDS = 1.0
 CONSECUTIVE_FAILURE_LIMIT = 5
 RSSI_MIN_DBM = -95
 RSSI_MAX_DBM = -25
+INFO_POLL_INTERVAL = 10.0
 
 
 def _read_proc_net_wireless(interface: str) -> float | None:
-    """Parse /proc/net/wireless for the given interface (Linux)."""
     try:
         with open("/proc/net/wireless") as f:
             for line in f:
                 if interface not in line:
                     continue
                 parts = line.split()
-                # Format:  wlan0:    0000   73.   -48.   -256   ...  (index 3 = level)
                 if len(parts) >= 4:
                     level_str = parts[3].replace(".", "")
-                    level = float(level_str)
-                    return level
+                    return float(level_str)
     except (FileNotFoundError, PermissionError, OSError, ValueError):
         return None
     return None
 
 
 def _run_iw_dev_link(interface: str) -> float | None:
-    """Run 'iw dev <iface> link' and parse signal strength (Linux)."""
     try:
         result = subprocess.run(
             ["iw", "dev", interface, "link"],
@@ -58,7 +46,6 @@ def _run_iw_dev_link(interface: str) -> float | None:
 
 
 def _run_iwconfig(interface: str) -> float | None:
-    """Run 'iwconfig <iface>' and parse signal level (Linux legacy)."""
     try:
         result = subprocess.run(
             ["iwconfig", interface],
@@ -73,7 +60,6 @@ def _run_iwconfig(interface: str) -> float | None:
 
 
 def _detect_linux_interfaces() -> list[str]:
-    """Auto-detect wireless interface names from /proc/net/wireless."""
     interfaces = []
     try:
         with open("/proc/net/wireless") as f:
@@ -89,7 +75,6 @@ def _detect_linux_interfaces() -> list[str]:
 
 
 def _rssi_linux() -> float | None:
-    """Try each Linux RSSI source in priority order."""
     interfaces = _detect_linux_interfaces()
     if not interfaces:
         return None
@@ -98,26 +83,16 @@ def _rssi_linux() -> float | None:
     rssi = _read_proc_net_wireless(iface)
     if rssi is not None:
         return rssi
-
     rssi = _run_iw_dev_link(iface)
     if rssi is not None:
         return rssi
-
     rssi = _run_iwconfig(iface)
     if rssi is not None:
         return rssi
-
     return None
 
 
 def _rssi_windows() -> float | None:
-    """Parse 'netsh wlan show interfaces' on Windows.
-    
-    Conversion: dBm = (percent / 2) - 100. This is a rough heuristic
-    because netsh reports a percentage, not true dBm. Different NICs
-    map percentage to dBm differently. The formula provides a reasonable
-    approximation for visualization purposes.
-    """
     try:
         result = subprocess.run(
             ["netsh", "wlan", "show", "interfaces"],
@@ -132,13 +107,119 @@ def _rssi_windows() -> float | None:
     return None
 
 
+def _get_ssid_from_iw(interface: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["iw", "dev", interface, "link"],
+            capture_output=True, text=True, timeout=5,
+        )
+        match = re.search(r"SSID:\s*(.+)", result.stdout)
+        if match:
+            return match.group(1).strip()
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None
+    return None
+
+
+def _get_ssid_from_iwconfig(interface: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["iwconfig", interface],
+            capture_output=True, text=True, timeout=5,
+        )
+        match = re.search(r'ESSID:"(.+?)"', result.stdout)
+        if match:
+            return match.group(1)
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None
+    return None
+
+
+def _get_ssid_windows() -> str | None:
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "show", "interfaces"],
+            capture_output=True, text=True, timeout=5,
+        )
+        match = re.search(r"SSID\s*:\s*(.+)", result.stdout)
+        if match:
+            return match.group(1).strip()
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None
+    return None
+
+
+def _get_ssid_macos() -> str | None:
+    path = (
+        "/System/Library/PrivateFrameworks/Apple80211.framework/"
+        "Versions/Current/Resources/airport"
+    )
+    if not os.path.exists(path):
+        return None
+    try:
+        result = subprocess.run(
+            [path, "-I"],
+            capture_output=True, text=True, timeout=5,
+        )
+        match = re.search(r"\s+SSID:\s*(.+)", result.stdout)
+        if match:
+            return match.group(1).strip()
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return None
+
+
+def _get_connected_device_names_linux(interface: str) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["iw", "dev", interface, "station", "dump"],
+            capture_output=True, text=True, timeout=5,
+        )
+        macs = []
+        for line in result.stdout.splitlines():
+            if line.startswith("Station "):
+                mac = line.split()[1]
+                macs.append(mac)
+        name_map: dict[str, str] = {}
+        try:
+            with open("/proc/net/arp") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 4 and parts[3] != "00:00:00:00:00:00":
+                        name_map[parts[3].lower()] = parts[0]
+        except OSError:
+            pass
+        names = []
+        for mac in macs:
+            ip = name_map.get(mac.lower())
+            if ip:
+                try:
+                    import socket
+                    hostname, _, _ = socket.gethostbyaddr(ip)
+                    names.append(hostname.split(".")[0])
+                except Exception:
+                    names.append(mac[-8:])
+            else:
+                names.append(mac[-8:])
+        return names
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return []
+
+
+def _get_connected_device_names_windows() -> list[str]:
+    try:
+        result = subprocess.run(
+            ["netsh", "wlan", "show", "hostednetwork"],
+            capture_output=True, text=True, timeout=5,
+        )
+        match = re.search(r"Number of clients\s*:\s*(\d+)", result.stdout)
+        count = int(match.group(1)) if match else 0
+        return [f"Device-{i + 1}" for i in range(count)]
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return []
+
+
 def _rssi_macos() -> float | None:
-    """Parse 'airport -I' on macOS.
-    
-    Note: Apple removed the airport binary from some newer macOS releases.
-    If the binary is missing, this returns None and the caller falls back
-    to simulation.
-    """
     path = (
         "/System/Library/PrivateFrameworks/Apple80211.framework/"
         "Versions/Current/Resources/airport"
@@ -159,8 +240,6 @@ def _rssi_macos() -> float | None:
 
 
 class RSSIProvider:
-    """Read real RSSI from the OS using platform-appropriate mechanisms."""
-
     def __init__(self):
         self.system = platform.system()
 
@@ -193,14 +272,34 @@ class RSSIProvider:
             return "macOS airport"
         return f"Unknown OS ({system})"
 
+    def get_ssid(self) -> str | None:
+        if self.system == "Linux":
+            interfaces = _detect_linux_interfaces()
+            if interfaces:
+                iface = interfaces[0]
+                ssid = _get_ssid_from_iw(iface)
+                if ssid is not None:
+                    return ssid
+                ssid = _get_ssid_from_iwconfig(iface)
+                if ssid is not None:
+                    return ssid
+        elif self.system == "Windows":
+            return _get_ssid_windows()
+        elif self.system == "Darwin":
+            return _get_ssid_macos()
+        return None
+
+    def get_connected_devices(self) -> list[str]:
+        if self.system == "Linux":
+            interfaces = _detect_linux_interfaces()
+            if interfaces:
+                return _get_connected_device_names_linux(interfaces[0])
+        elif self.system == "Windows":
+            return _get_connected_device_names_windows()
+        return []
+
 
 class SimulatedRSSIProvider:
-    """Produce realistic simulated RSSI when real data is unavailable.
-    
-    The simulation uses a slow sine wave (simulating movement through a space)
-    plus a temporal Gaussian random walk so the trace looks like real human
-    movement rather than a constant or pure noise.
-    """
     def __init__(self):
         self._t = 0.0
         self._walk = 0.0
@@ -209,32 +308,32 @@ class SimulatedRSSIProvider:
 
     def read(self) -> float:
         self._t += POLL_INTERVAL_SECONDS
-        # Slow drift: sine with 120s period, amplitude 15 dB
         drift = 15.0 * math.sin(2.0 * math.pi * self._t / 120.0)
-        # Random walk: small steps
         self._walk += self._rng.normal(0, 0.5)
-        # Clamp walk so it doesn't wander too far
         self._walk = max(-10.0, min(10.0, self._walk))
-        # Gaussian noise per sample
         noise = self._rng.normal(0, 1.0)
         value = -55.0 + drift + self._walk + noise
         value = max(RSSI_MIN_DBM, min(RSSI_MAX_DBM, value))
         self._last_value = value
         return value
 
+    def get_ssid(self) -> str:
+        return "SIMULATED_NETWORK"
+
+    def get_connected_devices(self) -> list[str]:
+        count = int(abs(np.random.default_rng().normal(3, 1.5))) + 1
+        return [f"Device-{i + 1}" for i in range(count)]
+
     @staticmethod
     def source_description() -> str:
-        return "Simulated (fallback — no OS Wi-Fi source available)"
+        return "Simulated (no Wi-Fi source available)"
 
 
 class RSSIWorker(QThread):
-    """Background thread that polls an RSSI provider and emits readings.
-    
-    Uses Qt signals (not shared state) to communicate with the GUI thread.
-    Automatically falls back to SimulatedRSSIProvider after N consecutive failures.
-    """
     rssi_updated = pyqtSignal(float, str)
     source_changed = pyqtSignal(str)
+    ssid_updated = pyqtSignal(str)
+    devices_updated = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -247,6 +346,7 @@ class RSSIWorker(QThread):
         self._failure_limit = CONSECUTIVE_FAILURE_LIMIT
         self._last_good_value: float | None = None
         self._is_simulated = False
+        self._info_counter = 0.0
 
     @property
     def is_simulated(self) -> bool:
@@ -267,14 +367,15 @@ class RSSIWorker(QThread):
             if rssi is not None:
                 self._consecutive_failures = 0
                 self._last_good_value = rssi
-                # If we were simulated and now have real data, switch back
                 if self._is_simulated:
                     self._is_simulated = False
                     self._current_provider = self._real_provider
                     self.source_changed.emit(
                         RSSIProvider.source_description()
                     )
-                self.rssi_updated.emit(rssi, "real" if not self._is_simulated else "simulated")
+                self.rssi_updated.emit(
+                    rssi, "real" if not self._is_simulated else "simulated"
+                )
             else:
                 self._consecutive_failures += 1
                 if self._consecutive_failures >= self._failure_limit:
@@ -289,12 +390,26 @@ class RSSIWorker(QThread):
                         )
                         self.rssi_updated.emit(sim_value, "simulated")
                 else:
-                    # Hold last known good value — don't emit garbage
                     if self._last_good_value is not None:
-                        self.rssi_updated.emit(self._last_good_value, "real (held)")
-                    # If we have no last good value, emit nothing (keep UI stable)
+                        self.rssi_updated.emit(
+                            self._last_good_value, "real (held)"
+                        )
 
-            # Sleep in small increments so we can stop quickly
+            self._info_counter += self._interval
+            if self._info_counter >= INFO_POLL_INTERVAL:
+                self._info_counter = 0.0
+                try:
+                    ssid = self._current_provider.get_ssid()
+                    if ssid is not None:
+                        self.ssid_updated.emit(ssid)
+                except Exception:
+                    pass
+                try:
+                    devices = self._current_provider.get_connected_devices()
+                    self.devices_updated.emit(devices)
+                except Exception:
+                    pass
+
             for _ in range(int(self._interval / 0.1)):
                 if not self._running:
                     return

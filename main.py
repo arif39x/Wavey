@@ -8,14 +8,16 @@ from presentation.gui import MainWindow
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("byakugan")
+    app.setApplicationName("Wavey")
 
     window = MainWindow()
-    window.show()
+    window.showMaximized()
 
     rssi_worker = RSSIWorker()
     rssi_worker.rssi_updated.connect(window.update_rssi)
     rssi_worker.source_changed.connect(window.update_source)
+    rssi_worker.ssid_updated.connect(window.update_ssid)
+    rssi_worker.devices_updated.connect(window.update_devices)
     rssi_worker.start()
 
     app.aboutToQuit.connect(rssi_worker.stop)
