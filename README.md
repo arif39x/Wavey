@@ -1,15 +1,20 @@
 # Wavey
 
-![Logo](logo.jpeg)
+![Logo](assets/logo.jpeg)
 
-[![Python](https://img.shields.io/badge/python-3.13+-blue)]()
-[![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green)]()
+[![Python](https://img.shields.io/badge/python-3.13+-blue?logo=python&logoColor=white)]()
+[![PyQt6](https://img.shields.io/badge/PyQt6-6.x-green?logo=qt&logoColor=white)]()
 [![VisPy](https://img.shields.io/badge/VisPy-0.16+-orange)]()
+[![NumPy](https://img.shields.io/badge/NumPy-2.x-013243?logo=numpy&logoColor=white)]()
+[![SciPy](https://img.shields.io/badge/SciPy-1.x-8CAAE6?logo=scipy&logoColor=white)]()
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)]()
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows%20%7C%20macos-lightgrey)]()
+[![OpenGL](https://img.shields.io/badge/GPU-OpenGL-red?logo=opengl&logoColor=white)]()
+[![Status](https://img.shields.io/badge/status-active-success)]()
 
 Real-time 3D Wi-Fi signal heatmapper. Walk around, click your position, and watch the heatmap build like a live thermal camera.
 
-![Interface](interface.png)
+![Interface](assets/interface.png)
 
 ## Quick Start
 
